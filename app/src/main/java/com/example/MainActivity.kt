@@ -48,11 +48,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -72,6 +75,8 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import com.example.ui.theme.MyApplicationTheme
@@ -105,7 +110,8 @@ enum class TabCategory(val label: String, val icon: ImageVector) {
     BACKGROUND("Background", Icons.Default.Palette),
     TEMPLATE("Template", Icons.Default.Smartphone),
     CANVAS("Canvas", Icons.Default.Layers),
-    WATERMARK("Watermark", Icons.Default.Verified)
+    WATERMARK("Watermark", Icons.Default.Verified),
+    BATCH("Batch Queue", Icons.Default.Collections)
 }
 
 enum class CanvasRatio(val label: String, val ratio: Float) {
@@ -245,6 +251,72 @@ val PhonePresets = listOf(
     )
 )
 
+data class DeviceFrameStyle(
+    val id: String,
+    val name: String,
+    val template: MockupTemplate,
+    val bezelThickness: Float,
+    val screenCornerRadius: Float,
+    val bezelColor: Color,
+    val defaultAspectRatio: Float,
+    val isTablet: Boolean = false,
+    val description: String = ""
+)
+
+val DeviceFrameStylePresets = listOf(
+    DeviceFrameStyle(
+        id = "pixel_8_pro",
+        name = "Pixel 8 Pro (Phone)",
+        template = MockupTemplate.PIXEL_MODERN,
+        bezelThickness = 10f,
+        screenCornerRadius = 28f,
+        bezelColor = Color(0xFF2E2E2E),
+        defaultAspectRatio = 9f / 19.5f,
+        description = "Sleek flat profile with a centered camera punch-hole."
+    ),
+    DeviceFrameStyle(
+        id = "generic_tablet",
+        name = "Generic Tablet (4:3)",
+        template = MockupTemplate.MINIMAL_BORDER,
+        bezelThickness = 14f,
+        screenCornerRadius = 16f,
+        bezelColor = Color(0xFF1C1B1F),
+        defaultAspectRatio = 4f / 3f,
+        isTablet = true,
+        description = "Modern symmetric thin-bezel tablet style in landscape or portrait."
+    ),
+    DeviceFrameStyle(
+        id = "iphone_15_pro",
+        name = "iPhone 15 Pro (Phone)",
+        template = MockupTemplate.DYNAMIC_ISLAND,
+        bezelThickness = 8f,
+        screenCornerRadius = 32f,
+        bezelColor = Color(0xFF1F1F1F),
+        defaultAspectRatio = 9f / 19.5f,
+        description = "Ultra-thin symmetric bezels with the Dynamic Island sensor."
+    ),
+    DeviceFrameStyle(
+        id = "generic_phone",
+        name = "Generic Phone (9:16)",
+        template = MockupTemplate.MINIMAL_BORDER,
+        bezelThickness = 6f,
+        screenCornerRadius = 32f,
+        bezelColor = Color(0xFF00E5FF),
+        defaultAspectRatio = 9f / 16f,
+        description = "Classic minimal thin border phone aspect ratio (9:16)."
+    ),
+    DeviceFrameStyle(
+        id = "galaxy_s24",
+        name = "Galaxy S24 Ultra (Phone)",
+        template = MockupTemplate.PIXEL_MODERN,
+        bezelThickness = 6f,
+        screenCornerRadius = 8f,
+        bezelColor = Color(0xFF0A0A0A),
+        defaultAspectRatio = 9f / 19.5f,
+        description = "Sharp, squared profile with micro bezel design borders."
+    )
+)
+
 // ==========================================
 // CORE APPLICATION LAYOUT
 // ==========================================
@@ -257,11 +329,21 @@ fun HiShootApp() {
 
     // Configuration states
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var autoMatchDeviceFrameRatio by remember { mutableStateOf(true) }
+    var detectedScreenshotAspectRatio by remember { mutableStateOf(9f / 19.5f) }
+    var selectedDeviceFrameStyleId by remember { mutableStateOf("pixel_8_pro") }
     var selectedBackgroundUri by remember { mutableStateOf<Uri?>(null) }
     var screenshotScale by remember { mutableStateOf(1.0f) }
     var screenshotOffsetX by remember { mutableStateOf(0f) }
     var screenshotOffsetY by remember { mutableStateOf(0f) }
     var deviceFrameScale by remember { mutableStateOf(0.72f) } // 0.3f to 0.95f
+
+    val deviceFrameAspectRatio = if (autoMatchDeviceFrameRatio && selectedImageUri != null) {
+        detectedScreenshotAspectRatio
+    } else {
+        val selectedStyle = DeviceFrameStylePresets.find { it.id == selectedDeviceFrameStyleId } ?: DeviceFrameStylePresets[0]
+        selectedStyle.defaultAspectRatio
+    }
 
     var backgroundType by remember { mutableStateOf(BackgroundType.GRADIENT) }
     var selectedSolidColor by remember { mutableStateOf(PresetColors[0]) }
@@ -277,6 +359,7 @@ fun HiShootApp() {
 
     var selectedGradientIndex by remember { mutableStateOf(0) } // Midnight Glow default
     var ambientBlurRadius by remember { mutableStateOf(15f) } // 5 to 25
+    var backgroundBlurRadius by remember { mutableStateOf(0f) } // 0 to 25 (0 means no blur)
 
     // Liquid Flow / Display Glass Blur Premium states
     var liquidThemeIndex by remember { mutableStateOf(0) }
@@ -291,6 +374,8 @@ fun HiShootApp() {
     var bezelThickness by remember { mutableStateOf(5f) } // 4dp to 24dp
     var screenCornerRadius by remember { mutableStateOf(32f) } // 0dp to 40dp
     var showStatusBarIcons by remember { mutableStateOf(true) }
+    var showGlossyReflection by remember { mutableStateOf(true) }
+    var glossyReflectionOpacity by remember { mutableStateOf(0.18f) }
 
     var activeRatio by remember { mutableStateOf(CanvasRatio.PORTRAIT_9_16) }
     var tiltX by remember { mutableStateOf(15f) } // -45 to 45
@@ -311,8 +396,19 @@ fun HiShootApp() {
     var watermarkSize by remember { mutableStateOf(14f) } // 10 to 24
     var watermarkOpacity by remember { mutableStateOf(0.7f) }
 
+    // Screenshot Image Filter states
+    var screenshotGrayscale by remember { mutableStateOf(0f) } // 0f to 1f
+    var screenshotSepia by remember { mutableStateOf(0f) } // 0f to 1f
+    var screenshotBrightness by remember { mutableStateOf(1f) } // 0.5f to 2f
+    var screenshotContrast by remember { mutableStateOf(1f) } // 0.5f to 2f
+    var screenshotLiquidGlass by remember { mutableStateOf(false) }
+
     var activeTab by remember { mutableStateOf(TabCategory.SCREENSHOT) }
     var isSaving by remember { mutableStateOf(false) }
+
+    var previewZoom by remember { mutableStateOf(1.0f) }
+    var previewPanX by remember { mutableStateOf(0f) }
+    var previewPanY by remember { mutableStateOf(0f) }
 
     // Media Picker launcher
     val photoPickerLauncher = rememberLauncherForActivityResult(
@@ -320,7 +416,37 @@ fun HiShootApp() {
         onResult = { uri ->
             if (uri != null) {
                 selectedImageUri = uri
+                val ratio = getScreenshotAspectRatio(context, uri)
+                detectedScreenshotAspectRatio = ratio
                 Toast.makeText(context, "Screenshot loaded successfully!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    )
+
+    // File input component launcher for local screenshot files
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = { uri ->
+            if (uri != null) {
+                selectedImageUri = uri
+                val ratio = getScreenshotAspectRatio(context, uri)
+                detectedScreenshotAspectRatio = ratio
+                Toast.makeText(context, "Screenshot file loaded successfully!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    )
+
+    val batchQueue = remember { mutableStateListOf<Uri>() }
+    var isBatchProcessing by remember { mutableStateOf(false) }
+    var batchProgressIndex by remember { mutableStateOf(0) }
+    var batchTotalItems by remember { mutableStateOf(0) }
+
+    val batchPhotoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(),
+        onResult = { uris ->
+            if (uris.isNotEmpty()) {
+                batchQueue.addAll(uris)
+                Toast.makeText(context, "${uris.size} screenshots added to the batch queue!", Toast.LENGTH_SHORT).show()
             }
         }
     )
@@ -339,6 +465,9 @@ fun HiShootApp() {
     // Reset everything to clean defaults
     val resetToDefaults = {
         selectedImageUri = null
+        autoMatchDeviceFrameRatio = true
+        detectedScreenshotAspectRatio = 9f / 19.5f
+        selectedDeviceFrameStyleId = "pixel_8_pro"
         selectedBackgroundUri = null
         screenshotScale = 1.0f
         screenshotOffsetX = 0f
@@ -351,6 +480,7 @@ fun HiShootApp() {
         customValue = 0.3f
         selectedGradientIndex = 0
         ambientBlurRadius = 15f
+        backgroundBlurRadius = 0f
         liquidThemeIndex = 0
         liquidScale = 1.2f
         showDisplayGlassBlur = false
@@ -379,6 +509,87 @@ fun HiShootApp() {
         watermarkColor = Color(0xBB00E5FF)
         watermarkSize = 14f
         watermarkOpacity = 0.7f
+        previewZoom = 1.0f
+        previewPanX = 0f
+        previewPanY = 0f
+        batchQueue.clear()
+    }
+
+    val processBatchQueue = {
+        if (batchQueue.isNotEmpty()) {
+            isBatchProcessing = true
+            batchTotalItems = batchQueue.size
+            batchProgressIndex = 0
+            coroutineScope.launch {
+                try {
+                    for (i in 0 until batchQueue.size) {
+                        val uri = batchQueue[i]
+                        batchProgressIndex = i + 1
+                        
+                        // If autoMatchDeviceFrameRatio is enabled, dynamically calculate detected aspect ratio for this screenshot!
+                        val actualDeviceFrameAspectRatio = if (autoMatchDeviceFrameRatio) {
+                            getScreenshotAspectRatio(context, uri)
+                        } else {
+                            deviceFrameAspectRatio
+                        }
+
+                        val highResBitmap = renderHighResMockup(
+                            context, activeRatio, backgroundType, selectedSolidColor, 
+                            PremiumGradients.getOrNull(selectedGradientIndex) ?: PremiumGradients[0],
+                            uri,
+                            actualDeviceFrameAspectRatio,
+                            ambientBlurRadius, screenshotScale, screenshotOffsetX, screenshotOffsetY,
+                            activeTemplate, bezelColor, bezelThickness, screenCornerRadius, showStatusBarIcons,
+                            tiltX, tiltY, tiltZ, perspectiveDepth, shadowStrength, showWatermark,
+                            watermarkText, watermarkPosition, watermarkColor, watermarkSize, watermarkOpacity,
+                            liquidThemeIndex, liquidScale, showDisplayGlassBlur, displayGlassBlurColor, displayGlassBlurOpacity,
+                            deviceFrameScale = deviceFrameScale,
+                            shadowEnabled = shadowEnabled,
+                            shadowBlurRadius = shadowBlurRadius,
+                            shadowOffsetX = shadowOffsetX,
+                            shadowOffsetY = shadowOffsetY,
+                            shadowColor = shadowColor,
+                            backgroundUri = selectedBackgroundUri,
+                            backgroundBlurRadius = backgroundBlurRadius,
+                            showGlossyReflection = showGlossyReflection,
+                            glossyReflectionOpacity = glossyReflectionOpacity
+                        )
+
+                        // Save each bitmap to Public MediaStore
+                        val filename = "HiShoot_Batch_${System.currentTimeMillis()}_$i.png"
+                        val resolver = context.contentResolver
+                        val contentValues = ContentValues().apply {
+                            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/HiShootStudio")
+                                put(MediaStore.Images.Media.IS_PENDING, 1)
+                            }
+                        }
+
+                        val imageUriResult = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                        if (imageUriResult != null) {
+                            resolver.openOutputStream(imageUriResult)?.use { outputStream ->
+                                highResBitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+                            }
+
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                contentValues.clear()
+                                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                                resolver.update(imageUriResult, contentValues, null, null)
+                            }
+                        }
+                    }
+                    Toast.makeText(context, "Successfully exported all $batchTotalItems mockups to Gallery!", Toast.LENGTH_LONG).show()
+                    batchQueue.clear()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(context, "Batch export error: ${e.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    isBatchProcessing = false
+                }
+            }
+        }
     }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -613,7 +824,15 @@ fun HiShootApp() {
                                         shadowOffsetX = shadowOffsetX,
                                         shadowOffsetY = shadowOffsetY,
                                         shadowColor = shadowColor,
-                                        backgroundUri = selectedBackgroundUri
+                                        backgroundUri = selectedBackgroundUri,
+                                        backgroundBlurRadius = backgroundBlurRadius,
+                                        showGlossyReflection = showGlossyReflection,
+                                        glossyReflectionOpacity = glossyReflectionOpacity,
+                                        screenshotGrayscale = screenshotGrayscale,
+                                        screenshotSepia = screenshotSepia,
+                                        screenshotBrightness = screenshotBrightness,
+                                        screenshotContrast = screenshotContrast,
+                                        screenshotLiquidGlass = screenshotLiquidGlass
                                     ) {
                                         isSaving = false
                                     }
@@ -658,51 +877,246 @@ fun HiShootApp() {
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                MockupCanvasContainer(
-                    aspectRatio = activeRatio,
-                    backgroundType = backgroundType,
-                    solidColor = selectedSolidColor,
-                    gradient = PremiumGradients[selectedGradientIndex],
-                    imageUri = selectedImageUri,
-                    ambientBlurRadius = ambientBlurRadius,
-                    screenshotScale = screenshotScale,
-                    screenshotOffsetX = screenshotOffsetX,
-                    screenshotOffsetY = screenshotOffsetY,
-                    activeTemplate = activeTemplate,
-                    bezelColor = bezelColor,
-                    bezelThickness = bezelThickness,
-                    screenCornerRadius = screenCornerRadius,
-                    showStatusBarIcons = showStatusBarIcons,
-                    tiltX = tiltX,
-                    tiltY = tiltY,
-                    tiltZ = tiltZ,
-                    perspectiveDepth = perspectiveDepth,
-                    shadowStrength = shadowStrength,
-                    showWatermark = showWatermark,
-                    watermarkText = watermarkText,
-                    watermarkPosition = watermarkPosition,
-                    watermarkColor = watermarkColor,
-                    watermarkSize = watermarkSize,
-                    watermarkOpacity = watermarkOpacity,
-                    liquidThemeIndex = liquidThemeIndex,
-                    liquidScale = liquidScale,
-                    showDisplayGlassBlur = showDisplayGlassBlur,
-                    displayGlassBlurColor = displayGlassBlurColor,
-                    displayGlassBlurOpacity = displayGlassBlurOpacity,
-                    liquidNoiseEnabled = liquidNoiseEnabled,
-                    deviceFrameScale = deviceFrameScale,
-                    shadowEnabled = shadowEnabled,
-                    shadowBlurRadius = shadowBlurRadius,
-                    shadowOffsetX = shadowOffsetX,
-                    shadowOffsetY = shadowOffsetY,
-                    shadowColor = shadowColor,
-                    backgroundUri = selectedBackgroundUri,
-                    onCanvasClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                // Zoomable & Pannable wrapper
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clipToBounds()
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoomChange, _ ->
+                                val newZoom = (previewZoom * zoomChange).coerceIn(0.5f, 4.0f)
+                                previewZoom = newZoom
+                                if (newZoom > 1.0f) {
+                                    previewPanX += pan.x * newZoom
+                                    previewPanY += pan.y * newZoom
+                                } else {
+                                    previewPanX = 0f
+                                    previewPanY = 0f
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .graphicsLayer {
+                                scaleX = previewZoom
+                                scaleY = previewZoom
+                                translationX = previewPanX
+                                translationY = previewPanY
+                            }
+                    ) {
+                        MockupCanvasContainer(
+                            aspectRatio = activeRatio,
+                            backgroundType = backgroundType,
+                            solidColor = selectedSolidColor,
+                            gradient = PremiumGradients[selectedGradientIndex],
+                            imageUri = selectedImageUri,
+                            deviceFrameAspectRatio = deviceFrameAspectRatio,
+                            ambientBlurRadius = ambientBlurRadius,
+                            screenshotScale = screenshotScale,
+                            screenshotOffsetX = screenshotOffsetX,
+                            screenshotOffsetY = screenshotOffsetY,
+                            activeTemplate = activeTemplate,
+                            bezelColor = bezelColor,
+                            bezelThickness = bezelThickness,
+                            screenCornerRadius = screenCornerRadius,
+                            showStatusBarIcons = showStatusBarIcons,
+                            tiltX = tiltX,
+                            tiltY = tiltY,
+                            tiltZ = tiltZ,
+                            perspectiveDepth = perspectiveDepth,
+                            shadowStrength = shadowStrength,
+                            showWatermark = showWatermark,
+                            watermarkText = watermarkText,
+                            watermarkPosition = watermarkPosition,
+                            watermarkColor = watermarkColor,
+                            watermarkSize = watermarkSize,
+                            watermarkOpacity = watermarkOpacity,
+                            liquidThemeIndex = liquidThemeIndex,
+                            liquidScale = liquidScale,
+                            showDisplayGlassBlur = showDisplayGlassBlur,
+                            displayGlassBlurColor = displayGlassBlurColor,
+                            displayGlassBlurOpacity = displayGlassBlurOpacity,
+                            liquidNoiseEnabled = liquidNoiseEnabled,
+                            deviceFrameScale = deviceFrameScale,
+                            shadowEnabled = shadowEnabled,
+                            shadowBlurRadius = shadowBlurRadius,
+                            shadowOffsetX = shadowOffsetX,
+                            shadowOffsetY = shadowOffsetY,
+                            shadowColor = shadowColor,
+                            backgroundUri = selectedBackgroundUri,
+                            backgroundBlurRadius = backgroundBlurRadius,
+                            showGlossyReflection = showGlossyReflection,
+                            glossyReflectionOpacity = glossyReflectionOpacity,
+                            screenshotGrayscale = screenshotGrayscale,
+                            screenshotSepia = screenshotSepia,
+                            screenshotBrightness = screenshotBrightness,
+                            screenshotContrast = screenshotContrast,
+                            screenshotLiquidGlass = screenshotLiquidGlass,
+                            onCanvasClick = {
+                                photoPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            }
                         )
                     }
-                )
+                }
+
+                // Floating Zoom Slider and Export Dock
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(12.dp)
+                        .fillMaxWidth(0.95f)
+                        .pointerInput(Unit) {}, // prevent clicks on controls from triggering picker
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Glassmorphic Zoom Control Bar
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.75f),
+                        shape = RoundedCornerShape(16.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.15f)),
+                        shadowElevation = 6.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ZoomIn,
+                                contentDescription = "Zoom Scale",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "${(previewZoom * 100).roundToInt()}%",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.width(32.dp)
+                            )
+                            Slider(
+                                value = previewZoom,
+                                onValueChange = {
+                                    previewZoom = it
+                                    if (it <= 1.0f) {
+                                        previewPanX = 0f
+                                        previewPanY = 0f
+                                    }
+                                },
+                                valueRange = 0.5f..3.0f,
+                                modifier = Modifier
+                                    .width(90.dp)
+                                    .height(20.dp),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                                )
+                            )
+                            if (previewZoom != 1.0f || previewPanX != 0f || previewPanY != 0f) {
+                                IconButton(
+                                    onClick = {
+                                        previewZoom = 1.0f
+                                        previewPanX = 0f
+                                        previewPanY = 0f
+                                    },
+                                    modifier = Modifier.size(20.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ZoomOutMap,
+                                        contentDescription = "Reset Zoom & Pan",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Export Button
+                    Button(
+                        onClick = {
+                            if (!isSaving) {
+                                isSaving = true
+                                saveMockupImage(
+                                    context = context,
+                                    aspectRatio = activeRatio,
+                                    backgroundType = backgroundType,
+                                    solidColor = selectedSolidColor,
+                                    gradient = PremiumGradients[selectedGradientIndex],
+                                    imageUri = selectedImageUri,
+                                    deviceFrameAspectRatio = deviceFrameAspectRatio,
+                                    ambientBlurRadius = ambientBlurRadius,
+                                    screenshotScale = screenshotScale,
+                                    screenshotOffsetX = screenshotOffsetX,
+                                    screenshotOffsetY = screenshotOffsetY,
+                                    activeTemplate = activeTemplate,
+                                    bezelColor = bezelColor,
+                                    bezelThickness = bezelThickness,
+                                    screenCornerRadius = screenCornerRadius,
+                                    showStatusBarIcons = showStatusBarIcons,
+                                    tiltX = tiltX,
+                                    tiltY = tiltY,
+                                    tiltZ = tiltZ,
+                                    perspectiveDepth = perspectiveDepth,
+                                    shadowStrength = shadowStrength,
+                                    showWatermark = showWatermark,
+                                    watermarkText = watermarkText,
+                                    watermarkPosition = watermarkPosition,
+                                    watermarkColor = watermarkColor,
+                                    watermarkSize = watermarkSize,
+                                    watermarkOpacity = watermarkOpacity,
+                                    coroutineScope = coroutineScope,
+                                    liquidThemeIndex = liquidThemeIndex,
+                                    liquidScale = liquidScale,
+                                    showDisplayGlassBlur = showDisplayGlassBlur,
+                                    displayGlassBlurColor = displayGlassBlurColor,
+                                    displayGlassBlurOpacity = displayGlassBlurOpacity,
+                                    deviceFrameScale = deviceFrameScale,
+                                    shadowEnabled = shadowEnabled,
+                                    shadowBlurRadius = shadowBlurRadius,
+                                    shadowOffsetX = shadowOffsetX,
+                                    shadowOffsetY = shadowOffsetY,
+                                    shadowColor = shadowColor,
+                                    backgroundUri = selectedBackgroundUri,
+                                    backgroundBlurRadius = backgroundBlurRadius,
+                                    showGlossyReflection = showGlossyReflection,
+                                    glossyReflectionOpacity = glossyReflectionOpacity,
+                                    screenshotGrayscale = screenshotGrayscale,
+                                    screenshotSepia = screenshotSepia,
+                                    screenshotBrightness = screenshotBrightness,
+                                    screenshotContrast = screenshotContrast,
+                                    screenshotLiquidGlass = screenshotLiquidGlass
+                                ) {
+                                    isSaving = false
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF10B981), // Emerald green for save
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Export PNG",
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Export PNG",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
 
                 // Indication bubble if saving
                 if (isSaving) {
@@ -722,6 +1136,54 @@ fun HiShootApp() {
                             ) {
                                 CircularProgressIndicator(color = Color(0xFF00E5FF))
                                 Text("Rendering mockup in high-res...", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+
+                if (isBatchProcessing) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.7f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.padding(32.dp).fillMaxWidth().testTag("batch_processing_dialog")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                CircularProgressIndicator(color = Color(0xFF00E5FF))
+                                Text(
+                                    text = "Batch Processing Queue",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Processing screenshot $batchProgressIndex of $batchTotalItems...",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                val fraction = if (batchTotalItems > 0) batchProgressIndex.toFloat() / batchTotalItems else 0f
+                                LinearProgressIndicator(
+                                    progress = fraction,
+                                    color = Color(0xFF00E5FF),
+                                    trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
+                                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
+                                )
+                                Text(
+                                    text = "Exported files are being saved to your gallery.",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
                             }
                         }
                     }
@@ -788,17 +1250,38 @@ fun HiShootApp() {
                                 screenshotScale = screenshotScale,
                                 screenshotOffsetX = screenshotOffsetX,
                                 screenshotOffsetY = screenshotOffsetY,
+                                autoMatchDeviceFrameRatio = autoMatchDeviceFrameRatio,
+                                onAutoMatchDeviceFrameRatioChange = { autoMatchDeviceFrameRatio = it },
+                                detectedScreenshotAspectRatio = detectedScreenshotAspectRatio,
                                 onScaleChange = { screenshotScale = it },
                                 onOffsetXChange = { screenshotOffsetX = it },
                                 onOffsetYChange = { screenshotOffsetY = it },
+                                screenshotGrayscale = screenshotGrayscale,
+                                onGrayscaleChange = { screenshotGrayscale = it },
+                                screenshotSepia = screenshotSepia,
+                                onSepiaChange = { screenshotSepia = it },
+                                screenshotBrightness = screenshotBrightness,
+                                onBrightnessChange = { screenshotBrightness = it },
+                                screenshotContrast = screenshotContrast,
+                                onContrastChange = { screenshotContrast = it },
+                                screenshotLiquidGlass = screenshotLiquidGlass,
+                                onLiquidGlassChange = { screenshotLiquidGlass = it },
                                 onPickImage = {
                                     photoPickerLauncher.launch(
                                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                     )
                                 },
+                                onPickFile = {
+                                    filePickerLauncher.launch("image/*")
+                                },
                                 onClearImage = { selectedImageUri = null },
                                 onReset = {
+                                    showGlossyReflection = true
+                                    glossyReflectionOpacity = 0.18f
                                     selectedImageUri = null
+                                    autoMatchDeviceFrameRatio = true
+                                    detectedScreenshotAspectRatio = 9f / 19.5f
+                                    selectedDeviceFrameStyleId = "pixel_8_pro"
                                     activeTemplate = MockupTemplate.MINIMAL_BORDER
                                     bezelColor = Color(0xFF00E5FF)
                                     bezelThickness = 5f
@@ -807,6 +1290,11 @@ fun HiShootApp() {
                                     screenshotScale = 1.0f
                                     screenshotOffsetX = 0f
                                     screenshotOffsetY = 0f
+                                    screenshotGrayscale = 0f
+                                    screenshotSepia = 0f
+                                    screenshotBrightness = 1f
+                                    screenshotContrast = 1f
+                                    screenshotLiquidGlass = false
                                 }
                             )
                         }
@@ -865,16 +1353,31 @@ fun HiShootApp() {
                         }
                         TabCategory.TEMPLATE -> {
                             TemplateTabContent(
+                                selectedDeviceFrameStyleId = selectedDeviceFrameStyleId,
+                                onDeviceFrameStyleChange = { styleId ->
+                                    selectedDeviceFrameStyleId = styleId
+                                    DeviceFrameStylePresets.find { it.id == styleId }?.let { style ->
+                                        activeTemplate = style.template
+                                        bezelThickness = style.bezelThickness
+                                        screenCornerRadius = style.screenCornerRadius
+                                        bezelColor = style.bezelColor
+                                        autoMatchDeviceFrameRatio = false
+                                    }
+                                },
                                 activeTemplate = activeTemplate,
                                 bezelColor = bezelColor,
                                 bezelThickness = bezelThickness,
                                 screenCornerRadius = screenCornerRadius,
                                 showStatusBarIcons = showStatusBarIcons,
+                                showGlossyReflection = showGlossyReflection,
+                                glossyReflectionOpacity = glossyReflectionOpacity,
                                 onTemplateChange = { activeTemplate = it },
                                 onBezelColorChange = { bezelColor = it },
                                 onThicknessChange = { bezelThickness = it },
                                 onCornerRadiusChange = { screenCornerRadius = it },
                                 onShowStatusBarChange = { showStatusBarIcons = it },
+                                onShowGlossyReflectionChange = { showGlossyReflection = it },
+                                onGlossyReflectionOpacityChange = { glossyReflectionOpacity = it },
                                 onOpenSidebar = {
                                     coroutineScope.launch {
                                         drawerState.open()
@@ -926,6 +1429,21 @@ fun HiShootApp() {
                                 onOpacityChange = { watermarkOpacity = it }
                             )
                         }
+                        TabCategory.BATCH -> {
+                            BatchTabContent(
+                                batchQueue = batchQueue,
+                                autoMatchDeviceFrameRatio = autoMatchDeviceFrameRatio,
+                                onAutoMatchDeviceFrameRatioChange = { autoMatchDeviceFrameRatio = it },
+                                onPickScreenshots = {
+                                    batchPhotoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                onRemoveScreenshot = { uri -> batchQueue.remove(uri) },
+                                onClearQueue = { batchQueue.clear() },
+                                onProcessBatch = { processBatchQueue() }
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(24.dp))
@@ -950,6 +1468,7 @@ fun HiShootApp() {
                                     solidColor = selectedSolidColor,
                                     gradient = PremiumGradients[selectedGradientIndex],
                                     imageUri = selectedImageUri,
+                                    deviceFrameAspectRatio = deviceFrameAspectRatio,
                                     ambientBlurRadius = ambientBlurRadius,
                                     screenshotScale = screenshotScale,
                                     screenshotOffsetX = screenshotOffsetX,
@@ -982,7 +1501,15 @@ fun HiShootApp() {
                                     shadowOffsetX = shadowOffsetX,
                                     shadowOffsetY = shadowOffsetY,
                                     shadowColor = shadowColor,
-                                    backgroundUri = selectedBackgroundUri
+                                    backgroundUri = selectedBackgroundUri,
+                                    backgroundBlurRadius = backgroundBlurRadius,
+                                    showGlossyReflection = showGlossyReflection,
+                                    glossyReflectionOpacity = glossyReflectionOpacity,
+                                    screenshotGrayscale = screenshotGrayscale,
+                                    screenshotSepia = screenshotSepia,
+                                    screenshotBrightness = screenshotBrightness,
+                                    screenshotContrast = screenshotContrast,
+                                    screenshotLiquidGlass = screenshotLiquidGlass
                                 ) {
                                     isSaving = false
                                 }
@@ -1007,6 +1534,7 @@ fun HiShootApp() {
                                     solidColor = selectedSolidColor,
                                     gradient = PremiumGradients[selectedGradientIndex],
                                     imageUri = selectedImageUri,
+                                    deviceFrameAspectRatio = deviceFrameAspectRatio,
                                     ambientBlurRadius = ambientBlurRadius,
                                     screenshotScale = screenshotScale,
                                     screenshotOffsetX = screenshotOffsetX,
@@ -1039,7 +1567,14 @@ fun HiShootApp() {
                                     shadowOffsetX = shadowOffsetX,
                                     shadowOffsetY = shadowOffsetY,
                                     shadowColor = shadowColor,
-                                    backgroundUri = selectedBackgroundUri
+                                    backgroundUri = selectedBackgroundUri,
+                                    showGlossyReflection = showGlossyReflection,
+                                    glossyReflectionOpacity = glossyReflectionOpacity,
+                                    screenshotGrayscale = screenshotGrayscale,
+                                    screenshotSepia = screenshotSepia,
+                                    screenshotBrightness = screenshotBrightness,
+                                    screenshotContrast = screenshotContrast,
+                                    screenshotLiquidGlass = screenshotLiquidGlass
                                 ) {
                                     isSaving = false
                                 }
@@ -1079,6 +1614,7 @@ fun MockupCanvasContainer(
     solidColor: Color,
     gradient: CustomGradient,
     imageUri: Uri?,
+    deviceFrameAspectRatio: Float = 9f / 19.5f,
     ambientBlurRadius: Float,
     screenshotScale: Float,
     screenshotOffsetX: Float,
@@ -1112,6 +1648,14 @@ fun MockupCanvasContainer(
     shadowOffsetY: Float = 15f,
     shadowColor: Color = Color.Black,
     backgroundUri: Uri? = null,
+    backgroundBlurRadius: Float = 0f,
+    showGlossyReflection: Boolean = true,
+    glossyReflectionOpacity: Float = 0.18f,
+    screenshotGrayscale: Float = 0f,
+    screenshotSepia: Float = 0f,
+    screenshotBrightness: Float = 1f,
+    screenshotContrast: Float = 1f,
+    screenshotLiquidGlass: Boolean = false,
     onCanvasClick: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1190,7 +1734,15 @@ fun MockupCanvasContainer(
                         model = backgroundUri,
                         contentDescription = "Background Backdrop Image",
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .let {
+                                if (backgroundBlurRadius > 0f) {
+                                    it.blur(backgroundBlurRadius.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
+                                } else {
+                                    it
+                                }
+                            }
                     )
                 } else {
                     Box(
@@ -1245,7 +1797,7 @@ fun MockupCanvasContainer(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(deviceFrameScale)
-                        .aspectRatio(9f / 19.5f)
+                        .aspectRatio(deviceFrameAspectRatio)
                         .graphicsLayer {
                             rotationX = -tiltX
                             rotationY = tiltY
@@ -1264,7 +1816,7 @@ fun MockupCanvasContainer(
             Box(
                 modifier = Modifier
                     .fillMaxWidth(deviceFrameScale)
-                    .aspectRatio(9f / 19.5f) // Realistic smartphone aspect ratio
+                    .aspectRatio(deviceFrameAspectRatio) // Dynamic smartphone aspect ratio
                     .graphicsLayer {
                         rotationX = -tiltX
                         rotationY = tiltY
@@ -1293,10 +1845,25 @@ fun MockupCanvasContainer(
                 ) {
                     // Screenshot AsyncImage
                     if (imageUri != null) {
+                        val filterMatrix = remember(screenshotGrayscale, screenshotSepia, screenshotBrightness, screenshotContrast) {
+                            androidx.compose.ui.graphics.ColorMatrix(
+                                getCombinedColorMatrixArray(
+                                    screenshotGrayscale,
+                                    screenshotSepia,
+                                    screenshotBrightness,
+                                    screenshotContrast
+                                )
+                            )
+                        }
                         AsyncImage(
                             model = imageUri,
                             contentDescription = "User Screenshot",
                             contentScale = ContentScale.Crop,
+                            colorFilter = if (screenshotGrayscale > 0f || screenshotSepia > 0f || screenshotBrightness != 1f || screenshotContrast != 1f) {
+                                androidx.compose.ui.graphics.ColorFilter.colorMatrix(filterMatrix)
+                            } else {
+                                null
+                            },
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer {
@@ -1306,6 +1873,48 @@ fun MockupCanvasContainer(
                                     translationY = screenshotOffsetY.dp.toPx()
                                 }
                         )
+
+                        // Liquid Glass Filter / Overlay on the screenshot itself
+                        if (screenshotLiquidGlass) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            colors = listOf(
+                                                Color(0x3A00F5D4),
+                                                Color(0x107B2CBF),
+                                                Color(0x409B5DE5)
+                                            )
+                                        )
+                                    )
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .drawBehind {
+                                        val path = android.graphics.Path().apply {
+                                            moveTo(0f, 0f)
+                                            lineTo(size.width, 0f)
+                                            cubicTo(size.width, size.height * 0.4f, 0f, size.height * 0.7f, 0f, size.height)
+                                            close()
+                                        }
+                                        drawPath(
+                                            path = androidx.compose.ui.graphics.Path().apply { asAndroidPath().set(path) },
+                                            brush = Brush.verticalGradient(
+                                                colors = listOf(Color.White.copy(alpha = 0.25f), Color.White.copy(alpha = 0.02f))
+                                            )
+                                        )
+                                        drawCircle(
+                                            brush = Brush.radialGradient(
+                                                colors = listOf(Color(0x4000E5FF), Color.Transparent),
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.8f, size.height * 0.2f),
+                                                radius = size.width * 0.6f
+                                            )
+                                        )
+                                    }
+                            )
+                        }
                     } else {
                         // Empty/Onboarding design state placeholder
                         ScreenshotPlaceholderState()
@@ -1349,6 +1958,25 @@ fun MockupCanvasContainer(
                                         strokeWidth = 24.dp.toPx()
                                     )
                                 }
+                        )
+                    }
+
+                    // Real Screen Glossy Reflection Overlay
+                    if (showGlossyReflection) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.linearGradient(
+                                        0.0f to Color.White.copy(alpha = glossyReflectionOpacity * 1.2f),
+                                        0.25f to Color.White.copy(alpha = glossyReflectionOpacity * 0.6f),
+                                        0.40f to Color.Transparent,
+                                        0.45f to Color.White.copy(alpha = glossyReflectionOpacity * 0.15f),
+                                        0.48f to Color.White.copy(alpha = glossyReflectionOpacity * 0.8f),
+                                        0.55f to Color.Transparent,
+                                        1.0f to Color.Transparent
+                                    )
+                                )
                         )
                     }
 
@@ -1686,39 +2314,122 @@ fun ScreenshotTabContent(
     screenshotScale: Float,
     screenshotOffsetX: Float,
     screenshotOffsetY: Float,
+    autoMatchDeviceFrameRatio: Boolean,
+    onAutoMatchDeviceFrameRatioChange: (Boolean) -> Unit,
+    detectedScreenshotAspectRatio: Float,
     onScaleChange: (Float) -> Unit,
     onOffsetXChange: (Float) -> Unit,
     onOffsetYChange: (Float) -> Unit,
+    screenshotGrayscale: Float,
+    onGrayscaleChange: (Float) -> Unit,
+    screenshotSepia: Float,
+    onSepiaChange: (Float) -> Unit,
+    screenshotBrightness: Float,
+    onBrightnessChange: (Float) -> Unit,
+    screenshotContrast: Float,
+    onContrastChange: (Float) -> Unit,
+    screenshotLiquidGlass: Boolean,
+    onLiquidGlassChange: (Boolean) -> Unit,
     onPickImage: () -> Unit,
+    onPickFile: () -> Unit,
     onClearImage: () -> Unit,
     onReset: () -> Unit
 ) {
-    ControlCard {
-        Column(modifier = Modifier.fillMaxWidth()) {
+    if (selectedImageUri != null) {
+        ControlCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Button(
-                    onClick = onPickImage,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f).testTag("select_screenshot_button")
+                // Mini preview of the loaded screenshot
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
-                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Select Screenshot")
+                    AsyncImage(
+                        model = selectedImageUri,
+                        contentDescription = "Selected Screenshot",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
-                if (selectedImageUri != null) {
-                    OutlinedButton(
-                        onClick = onClearImage,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error)
-                    ) {
-                        Text("Clear")
-                    }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Active Screenshot",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Screenshot placed inside the frame successfully.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onPickFile,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f).height(40.dp).testTag("change_file_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderOpen,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Change File", fontSize = 12.sp)
+                }
+
+                OutlinedButton(
+                    onClick = onPickImage,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.primary
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f).height(40.dp).testTag("change_gallery_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AddPhotoAlternate,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Use Gallery", fontSize = 12.sp)
+                }
+
+                OutlinedButton(
+                    onClick = onClearImage,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.height(40.dp).testTag("clear_screenshot_button")
+                ) {
+                    Text("Clear", fontSize = 12.sp)
                 }
             }
 
@@ -1732,9 +2443,277 @@ fun ScreenshotTabContent(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth().testTag("reset_screenshot_frame_button")
             ) {
-                Icon(Icons.Default.Refresh, contentDescription = "Reset Frame and Screenshot")
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = "Reset Frame and Screenshot",
+                    modifier = Modifier.size(16.dp)
+                )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Reset Screenshot & Frame")
+                Text("Reset Screenshot & Frame", fontSize = 12.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        ControlCard {
+            Text(
+                text = "Screenshot Style & Filters",
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+
+            // Grayscale
+            LabelSlider(
+                label = "Grayscale",
+                value = screenshotGrayscale,
+                valueRange = 0f..1f,
+                displayValue = "${(screenshotGrayscale * 100).roundToInt()}%",
+                onValueChange = onGrayscaleChange
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Sepia
+            LabelSlider(
+                label = "Sepia Tone",
+                value = screenshotSepia,
+                valueRange = 0f..1f,
+                displayValue = "${(screenshotSepia * 100).roundToInt()}%",
+                onValueChange = onSepiaChange
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Brightness
+            LabelSlider(
+                label = "Brightness",
+                value = screenshotBrightness,
+                valueRange = 0.5f..1.5f,
+                displayValue = "${(screenshotBrightness * 100).roundToInt()}%",
+                onValueChange = onBrightnessChange
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Contrast
+            LabelSlider(
+                label = "Contrast",
+                value = screenshotContrast,
+                valueRange = 0.5f..1.5f,
+                displayValue = "${(screenshotContrast * 100).roundToInt()}%",
+                onValueChange = onContrastChange
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Liquid Glass effect toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = if (screenshotLiquidGlass) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = if (screenshotLiquidGlass) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(
+                                color = if (screenshotLiquidGlass) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Filter,
+                            contentDescription = null,
+                            tint = if (screenshotLiquidGlass) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Liquid Glass Effect",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Applies a premium 3D glass gloss overlay",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                androidx.compose.material3.Switch(
+                    checked = screenshotLiquidGlass,
+                    onCheckedChange = onLiquidGlassChange,
+                    modifier = Modifier.testTag("liquid_glass_switch")
+                )
+            }
+        }
+    } else {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("screenshot_upload_card"),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.15f)
+            ),
+            shape = RoundedCornerShape(16.dp),
+            border = androidx.compose.foundation.BorderStroke(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                            shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudUpload,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Upload Screenshot File",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Select a PNG or JPG file from your device files or photo gallery to place inside the device mockup frame.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        textAlign = TextAlign.Center,
+                        lineHeight = 15.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = onPickFile,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f).height(44.dp).testTag("upload_file_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Choose File", fontSize = 13.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = onPickImage,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f).height(44.dp).testTag("select_gallery_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AddPhotoAlternate,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Use Gallery", fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+    }
+
+    if (selectedImageUri != null) {
+        Spacer(modifier = Modifier.height(16.dp))
+        ControlCard(title = "Auto-Match Device Frame") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Match Frame to Screenshot",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    val ratioDesc = when {
+                        Math.abs(detectedScreenshotAspectRatio - (9f / 16f)) < 0.02f -> "9:16 (Portrait)"
+                        Math.abs(detectedScreenshotAspectRatio - (9f / 19.5f)) < 0.02f -> "9:19.5 (Tall Portrait)"
+                        Math.abs(detectedScreenshotAspectRatio - 1f) < 0.02f -> "1:1 (Square)"
+                        Math.abs(detectedScreenshotAspectRatio - (4f / 3f)) < 0.02f -> "4:3 (Tablet)"
+                        Math.abs(detectedScreenshotAspectRatio - (16f / 9f)) < 0.02f -> "16:9 (Landscape)"
+                        else -> {
+                            val computedY = ((9f / detectedScreenshotAspectRatio) * 10).roundToInt() / 10f
+                            "Custom (9 : $computedY)"
+                        }
+                    }
+                    Text(
+                        text = "Detected ratio: $ratioDesc",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Switch(
+                    checked = autoMatchDeviceFrameRatio,
+                    onCheckedChange = onAutoMatchDeviceFrameRatioChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = MaterialTheme.colorScheme.primary,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    ),
+                    modifier = Modifier.testTag("auto_match_ratio_switch")
+                )
             }
         }
     }
@@ -1769,6 +2748,202 @@ fun ScreenshotTabContent(
             displayValue = "${screenshotOffsetY.roundToInt()}dp",
             onValueChange = onOffsetYChange
         )
+    }
+}
+
+// ==========================================
+// BATCH CONTROLS CONTENT
+// ==========================================
+
+@Composable
+fun BatchTabContent(
+    batchQueue: List<Uri>,
+    autoMatchDeviceFrameRatio: Boolean,
+    onAutoMatchDeviceFrameRatioChange: (Boolean) -> Unit,
+    onPickScreenshots: () -> Unit,
+    onRemoveScreenshot: (Uri) -> Unit,
+    onClearQueue: () -> Unit,
+    onProcessBatch: () -> Unit
+) {
+    ControlCard {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = "Batch Process",
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Apply your current mockup styles, 3D tilt, shadow, and background styling to multiple screenshots and save them in bulk.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                lineHeight = 15.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onPickScreenshots,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f).testTag("batch_select_button")
+                ) {
+                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Add Screenshots", fontSize = 13.sp)
+                }
+
+                if (batchQueue.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = onClearQueue,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                        modifier = Modifier.testTag("batch_clear_button")
+                    ) {
+                        Text("Clear All")
+                    }
+                }
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    ControlCard(title = "Batch Settings") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Dynamic Ratio Detection",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "Detects & matches device frame ratio for each screenshot separately",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
+            }
+            Switch(
+                checked = autoMatchDeviceFrameRatio,
+                onCheckedChange = onAutoMatchDeviceFrameRatioChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.primary,
+                    checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                ),
+                modifier = Modifier.testTag("batch_auto_match_switch")
+            )
+        }
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    if (batchQueue.isEmpty()) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(32.dp).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Collections,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.size(56.dp)
+                )
+                Text(
+                    text = "Queue is empty",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Select one or more screenshots above to start batch exporting.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+    } else {
+        ControlCard(title = "Screenshots Queue (${batchQueue.size})") {
+            val chunked = batchQueue.chunked(3)
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                chunked.forEach { rowItems ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        rowItems.forEach { uri ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .aspectRatio(9f / 16f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                AsyncImage(
+                                    model = uri,
+                                    contentDescription = null,
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+
+                                IconButton(
+                                    onClick = { onRemoveScreenshot(uri) },
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(4.dp)
+                                        .size(24.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), shape = CircleShape)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                        val remaining = 3 - rowItems.size
+                        for (i in 0 until remaining) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = onProcessBatch,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().height(50.dp).testTag("batch_process_button")
+        ) {
+            Icon(Icons.Default.Download, contentDescription = null, tint = Color.Black)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Process & Export Batch Queue", fontWeight = FontWeight.Bold, color = Color.Black, fontSize = 15.sp)
+        }
     }
 }
 
@@ -2421,18 +3596,131 @@ fun BackgroundTabContent(
 
 @Composable
 fun TemplateTabContent(
+    selectedDeviceFrameStyleId: String,
+    onDeviceFrameStyleChange: (String) -> Unit,
     activeTemplate: MockupTemplate,
     bezelColor: Color,
     bezelThickness: Float,
     screenCornerRadius: Float,
     showStatusBarIcons: Boolean,
+    showGlossyReflection: Boolean,
+    glossyReflectionOpacity: Float,
     onTemplateChange: (MockupTemplate) -> Unit,
     onBezelColorChange: (Color) -> Unit,
     onThicknessChange: (Float) -> Unit,
     onCornerRadiusChange: (Float) -> Unit,
     onShowStatusBarChange: (Boolean) -> Unit,
+    onShowGlossyReflectionChange: (Boolean) -> Unit,
+    onGlossyReflectionOpacityChange: (Float) -> Unit,
     onOpenSidebar: () -> Unit
 ) {
+    var styleMenuExpanded by remember { mutableStateOf(false) }
+    val currentStyle = DeviceFrameStylePresets.find { it.id == selectedDeviceFrameStyleId } ?: DeviceFrameStylePresets[0]
+
+    ControlCard(title = "Material 3 Device Style") {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                    .clickable { styleMenuExpanded = true }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = if (currentStyle.isTablet) Icons.Default.TabletAndroid else Icons.Default.Smartphone,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Column {
+                        Text(
+                            text = currentStyle.name,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = currentStyle.description,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            lineHeight = 14.sp
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = Icons.Default.ArrowDropDown,
+                    contentDescription = "Expand device styles menu",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            DropdownMenu(
+                expanded = styleMenuExpanded,
+                onDismissRequest = { styleMenuExpanded = false },
+                modifier = Modifier
+                    .fillMaxWidth(0.9f)
+                    .background(MaterialTheme.colorScheme.surface)
+            ) {
+                DeviceFrameStylePresets.forEach { style ->
+                    val isSelected = style.id == selectedDeviceFrameStyleId
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (style.isTablet) Icons.Default.TabletAndroid else Icons.Default.Smartphone,
+                                    contentDescription = null,
+                                    tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = style.name,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = 13.sp,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = style.description,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                        lineHeight = 14.sp
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Selected",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        },
+                        onClick = {
+                            onDeviceFrameStyleChange(style.id)
+                            styleMenuExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
     ControlCard(title = "Hardware Model Presets") {
         Row(
             modifier = Modifier
@@ -2547,6 +3835,40 @@ fun TemplateTabContent(
             displayValue = "${screenCornerRadius.roundToInt()}dp",
             onValueChange = onCornerRadiusChange
         )
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    ControlCard(title = "Glossy Screen Reflection") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Enable Screen Gloss & Reflection", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Adds a realistic angled physical light reflection sheen on top of the screenshot.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            }
+            Switch(
+                checked = showGlossyReflection,
+                onCheckedChange = onShowGlossyReflectionChange,
+                modifier = Modifier.testTag("glossy_reflection_toggle")
+            )
+        }
+
+        if (showGlossyReflection) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Divider()
+            Spacer(modifier = Modifier.height(12.dp))
+
+            LabelSlider(
+                label = "Gloss Intensity",
+                value = glossyReflectionOpacity,
+                valueRange = 0.05f..0.60f,
+                displayValue = "${(glossyReflectionOpacity * 100).roundToInt()}%",
+                onValueChange = onGlossyReflectionOpacityChange
+            )
+        }
     }
 
     Spacer(modifier = Modifier.height(16.dp))
@@ -2696,10 +4018,92 @@ fun CanvasTabContent(
         LabelSlider(
             label = "Roll Z (Spin Angle)",
             value = tiltZ,
-            valueRange = -90f..90f,
+            valueRange = -180f..180f,
             displayValue = "${tiltZ.roundToInt()}°",
             onValueChange = onTiltZChange
         )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Quick Mockup Rotation",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            val rotationType = when (tiltZ.roundToInt()) {
+                0 -> "Portrait"
+                90 -> "Landscape"
+                180, -180 -> "Upside Portrait"
+                90, -90 -> "Landscape Rev"
+                else -> "Custom Rotation"
+            }
+            Text(
+                text = rotationType,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val rotationAngles = listOf(
+                0f to "Portrait (0°)",
+                90f to "Landscape (90°)",
+                180f to "Upside Portrait (180°)",
+                -90f to "Landscape Rev (270°)"
+            )
+            rotationAngles.forEach { (angle, desc) ->
+                val active = tiltZ.roundToInt() == angle.roundToInt()
+                Button(
+                    onClick = { onTiltZChange(angle) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        contentColor = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("rotate_btn_${if (angle < 0) 270 else angle.toInt()}"),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp),
+                    border = if (active) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Smartphone,
+                            contentDescription = desc,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .graphicsLayer { rotationZ = angle },
+                            tint = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = when (angle) {
+                                0f -> "0°"
+                                90f -> "90°"
+                                180f -> "180°"
+                                else -> "270°"
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = if (active) FontWeight.ExtraBold else FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -3076,6 +4480,25 @@ fun LabelSlider(
 // PROCEDURAL IMAGE UTILITIES
 // ==========================================
 
+fun getScreenshotAspectRatio(context: Context, uri: Uri): Float {
+    return try {
+        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeStream(inputStream, null, options)
+            if (options.outWidth > 0 && options.outHeight > 0) {
+                options.outWidth.toFloat() / options.outHeight.toFloat()
+            } else {
+                9f / 19.5f
+            }
+        } ?: (9f / 19.5f)
+    } catch (e: Exception) {
+        e.printStackTrace()
+        9f / 19.5f
+    }
+}
+
 fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
     return try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -3195,6 +4618,83 @@ fun blurBitmap(sentBitmap: Bitmap, radius: Int): Bitmap {
 
     bitmap.setPixels(pix, 0, w, 0, 0, w, h)
     return bitmap
+
+}
+
+/**
+ * Calculates a combined color matrix array for Grayscale, Sepia, Brightness, and Contrast.
+ */
+fun getCombinedColorMatrixArray(
+    grayscale: Float,
+    sepia: Float,
+    brightness: Float,
+    contrast: Float
+): FloatArray {
+    val m = floatArrayOf(
+        1f, 0f, 0f, 0f, 0f,
+        0f, 1f, 0f, 0f, 0f,
+        0f, 0f, 1f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f
+    )
+    
+    // 1. Grayscale / Saturation
+    val sat = 1f - grayscale
+    if (sat != 1f) {
+        val invSat = 1f - sat
+        val r = 0.213f * invSat
+        val g = 0.715f * invSat
+        val b = 0.072f * invSat
+        
+        m[0] = r + sat; m[1] = g; m[2] = b
+        m[5] = r; m[6] = g + sat; m[7] = b
+        m[10] = r; m[11] = g; m[12] = b + sat
+    }
+    
+    // 2. Sepia
+    if (sepia > 0f) {
+        val s = sepia
+        val invS = 1f - s
+        
+        val s00 = 0.393f * s + invS; val s01 = 0.769f * s; val s02 = 0.189f * s
+        val s10 = 0.349f * s; val s11 = 0.686f * s + invS; val s12 = 0.168f * s
+        val s20 = 0.272f * s; val s21 = 0.534f * s; val s22 = 0.131f * s + invS
+        
+        val r00 = m[0]*s00 + m[5]*s01 + m[10]*s02
+        val r01 = m[1]*s00 + m[6]*s01 + m[11]*s02
+        val r02 = m[2]*s00 + m[7]*s01 + m[12]*s02
+        
+        val r10 = m[0]*s10 + m[5]*s11 + m[10]*s12
+        val r11 = m[1]*s10 + m[6]*s11 + m[11]*s12
+        val r12 = m[2]*s10 + m[7]*s11 + m[12]*s12
+        
+        val r20 = m[0]*s20 + m[5]*s21 + m[10]*s22
+        val r21 = m[1]*s20 + m[6]*s21 + m[11]*s22
+        val r22 = m[2]*s20 + m[7]*s21 + m[12]*s22
+        
+        m[0] = r00; m[1] = r01; m[2] = r02
+        m[5] = r10; m[6] = r11; m[7] = r12
+        m[10] = r20; m[11] = r21; m[12] = r22
+    }
+    
+    // 3. Contrast
+    if (contrast != 1f) {
+        val c = contrast
+        val off = 128f * (1f - c)
+        
+        m[0] *= c; m[1] *= c; m[2] *= c; m[4] = m[4] * c + off
+        m[5] *= c; m[6] *= c; m[7] *= c; m[9] = m[9] * c + off
+        m[10] *= c; m[11] *= c; m[12] *= c; m[14] = m[14] * c + off
+    }
+    
+    // 4. Brightness
+    val bOffset = (brightness - 1f) * 255f
+    if (bOffset != 0f) {
+        m[4] += bOffset
+        m[9] += bOffset
+        m[14] += bOffset
+    }
+    
+    return m
 }
 
 // ==========================================
@@ -3211,6 +4711,7 @@ suspend fun renderHighResMockup(
     solidColor: Color,
     gradient: CustomGradient,
     imageUri: Uri?,
+    deviceFrameAspectRatio: Float = 9f / 19.5f,
     ambientBlurRadius: Float,
     screenshotScale: Float,
     screenshotOffsetX: Float,
@@ -3242,7 +4743,15 @@ suspend fun renderHighResMockup(
     shadowOffsetX: Float = 10f,
     shadowOffsetY: Float = 15f,
     shadowColor: Color = Color.Black,
-    backgroundUri: Uri? = null
+    backgroundUri: Uri? = null,
+    backgroundBlurRadius: Float = 0f,
+    showGlossyReflection: Boolean = true,
+    glossyReflectionOpacity: Float = 0.18f,
+    screenshotGrayscale: Float = 0f,
+    screenshotSepia: Float = 0f,
+    screenshotBrightness: Float = 1f,
+    screenshotContrast: Float = 1f,
+    screenshotLiquidGlass: Boolean = false
 ): Bitmap = withContext(Dispatchers.IO) {
     // 1. CHOOSE HIGH RESOLUTION EXPORT SIZE (Standard 1080p width base)
     val width = 1440
@@ -3339,7 +4848,19 @@ suspend fun renderHighResMockup(
         BackgroundType.IMAGE -> {
             var loadedBg: Bitmap? = null
             if (backgroundUri != null) {
-                loadedBg = uriToBitmap(context, backgroundUri)
+                val sBmp = uriToBitmap(context, backgroundUri)
+                if (sBmp != null) {
+                    if (backgroundBlurRadius > 0f) {
+                        // Scale down for fast and smooth blur computation
+                        val scaleFactor = 400
+                        val scaledWidth = scaleFactor
+                        val scaledHeight = (scaleFactor * (sBmp.height.toFloat() / sBmp.width)).roundToInt().coerceAtLeast(1)
+                        val scaled = Bitmap.createScaledBitmap(sBmp, scaledWidth, scaledHeight, true)
+                        loadedBg = blurBitmap(scaled, backgroundBlurRadius.roundToInt().coerceIn(1, 25))
+                    } else {
+                        loadedBg = sBmp
+                    }
+                }
             }
             if (loadedBg != null) {
                 val dstRect = android.graphics.Rect(0, 0, width, height)
@@ -3364,7 +4885,7 @@ suspend fun renderHighResMockup(
 
     // 3. GRAPHICS LAYER MATRIX 3D TRANSFORMATION USING CAMERA
     val deviceWidth = width * deviceFrameScale
-    val deviceHeight = deviceWidth * (19.5f / 9f)
+    val deviceHeight = deviceWidth / deviceFrameAspectRatio
 
     val deviceCenterX = width / 2f
     val deviceCenterY = height / 2f
@@ -3494,7 +5015,71 @@ suspend fun renderHighResMockup(
         val transY = (innerRect.centerY() - scHeight * scale / 2f) + (screenshotOffsetY * (deviceWidth / 280f))
         scMatrix.postTranslate(transX, transY)
 
-        canvas.drawBitmap(screenshotBmp, scMatrix, Paint().apply { isAntiAlias = true })
+        val paint = Paint().apply { isAntiAlias = true }
+        if (screenshotGrayscale > 0f || screenshotSepia > 0f || screenshotBrightness != 1f || screenshotContrast != 1f) {
+            val filterMatrix = android.graphics.ColorMatrix(
+                getCombinedColorMatrixArray(
+                    screenshotGrayscale,
+                    screenshotSepia,
+                    screenshotBrightness,
+                    screenshotContrast
+                )
+            )
+            paint.colorFilter = android.graphics.ColorMatrixColorFilter(filterMatrix)
+        }
+        canvas.drawBitmap(screenshotBmp, scMatrix, paint)
+
+        // Draw Liquid Glass overlay on the screenshot
+        if (screenshotLiquidGlass) {
+            // 1. Draw Liquid Glass Background tint
+            val glassBgPaint = Paint().apply {
+                isAntiAlias = true
+                shader = LinearGradient(
+                    innerRect.left, innerRect.top, innerRect.left, innerRect.bottom,
+                    intArrayOf(
+                        AndroidColor.parseColor("#3A00F5D4"),
+                        AndroidColor.parseColor("#107B2CBF"),
+                        AndroidColor.parseColor("#409B5DE5")
+                    ),
+                    null, Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(innerRect, glassBgPaint)
+            
+            // 2. Draw glossy reflection arc path
+            val path = Path().apply {
+                moveTo(innerRect.left, innerRect.top)
+                lineTo(innerRect.right, innerRect.top)
+                cubicTo(innerRect.right, innerRect.top + innerRect.height() * 0.4f, innerRect.left, innerRect.top + innerRect.height() * 0.7f, innerRect.left, innerRect.bottom)
+                close()
+            }
+            val arcPaint = Paint().apply {
+                isAntiAlias = true
+                shader = LinearGradient(
+                    innerRect.left, innerRect.top, innerRect.left, innerRect.bottom,
+                    intArrayOf(
+                        AndroidColor.argb((255 * 0.25f).toInt(), 255, 255, 255),
+                        AndroidColor.argb((255 * 0.02f).toInt(), 255, 255, 255)
+                    ),
+                    null, Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawPath(path, arcPaint)
+            
+            // 3. Draw secondary glowing glass frost vignette
+            val glowPaint = Paint().apply {
+                isAntiAlias = true
+                shader = RadialGradient(
+                    innerRect.left + innerRect.width() * 0.8f, innerRect.top + innerRect.height() * 0.2f, innerRect.width() * 0.6f,
+                    intArrayOf(
+                        AndroidColor.parseColor("#4000E5FF"),
+                        AndroidColor.TRANSPARENT
+                    ),
+                    null, Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(innerRect, glowPaint)
+        }
     } else {
         // Empty state gradient placeholder
         val placeholderColors = intArrayOf(
@@ -3553,6 +5138,29 @@ suspend fun renderHighResMockup(
             innerRect.right, innerRect.bottom,
             linePaint
         )
+    }
+
+    if (showGlossyReflection) {
+        val glossPaint = Paint().apply {
+            isAntiAlias = true
+            style = Paint.Style.FILL
+            val glossColors = intArrayOf(
+                AndroidColor.argb((255 * glossyReflectionOpacity * 1.2f).toInt().coerceIn(0, 255), 255, 255, 255),
+                AndroidColor.argb((255 * glossyReflectionOpacity * 0.6f).toInt().coerceIn(0, 255), 255, 255, 255),
+                AndroidColor.TRANSPARENT,
+                AndroidColor.argb((255 * glossyReflectionOpacity * 0.15f).toInt().coerceIn(0, 255), 255, 255, 255),
+                AndroidColor.argb((255 * glossyReflectionOpacity * 0.8f).toInt().coerceIn(0, 255), 255, 255, 255),
+                AndroidColor.TRANSPARENT,
+                AndroidColor.TRANSPARENT
+            )
+            val positions = floatArrayOf(0.0f, 0.25f, 0.40f, 0.45f, 0.48f, 0.55f, 1.0f)
+            shader = LinearGradient(
+                innerRect.left, innerRect.top,
+                innerRect.right, innerRect.bottom,
+                glossColors, positions, Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(innerRect, glossPaint)
     }
 
     // Render Hardware Accent features (Punch Hole, Notch)
@@ -3692,6 +5300,7 @@ fun saveMockupImage(
     solidColor: Color,
     gradient: CustomGradient,
     imageUri: Uri?,
+    deviceFrameAspectRatio: Float = 9f / 19.5f,
     ambientBlurRadius: Float,
     screenshotScale: Float,
     screenshotOffsetX: Float,
@@ -3725,12 +5334,21 @@ fun saveMockupImage(
     shadowOffsetY: Float = 15f,
     shadowColor: Color = Color.Black,
     backgroundUri: Uri? = null,
+    backgroundBlurRadius: Float = 0f,
+    showGlossyReflection: Boolean = true,
+    glossyReflectionOpacity: Float = 0.18f,
+    screenshotGrayscale: Float = 0f,
+    screenshotSepia: Float = 0f,
+    screenshotBrightness: Float = 1f,
+    screenshotContrast: Float = 1f,
+    screenshotLiquidGlass: Boolean = false,
     onComplete: () -> Unit
 ) {
     coroutineScope.launch {
         try {
             val highResBitmap = renderHighResMockup(
                 context, aspectRatio, backgroundType, solidColor, gradient, imageUri,
+                deviceFrameAspectRatio,
                 ambientBlurRadius, screenshotScale, screenshotOffsetX, screenshotOffsetY,
                 activeTemplate, bezelColor, bezelThickness, screenCornerRadius, showStatusBarIcons,
                 tiltX, tiltY, tiltZ, perspectiveDepth, shadowStrength, showWatermark,
@@ -3742,7 +5360,15 @@ fun saveMockupImage(
                 shadowOffsetX = shadowOffsetX,
                 shadowOffsetY = shadowOffsetY,
                 shadowColor = shadowColor,
-                backgroundUri = backgroundUri
+                backgroundUri = backgroundUri,
+                backgroundBlurRadius = backgroundBlurRadius,
+                showGlossyReflection = showGlossyReflection,
+                glossyReflectionOpacity = glossyReflectionOpacity,
+                screenshotGrayscale = screenshotGrayscale,
+                screenshotSepia = screenshotSepia,
+                screenshotBrightness = screenshotBrightness,
+                screenshotContrast = screenshotContrast,
+                screenshotLiquidGlass = screenshotLiquidGlass
             )
 
             // Save to Public MediaStore
@@ -3789,6 +5415,7 @@ fun shareMockupImage(
     solidColor: Color,
     gradient: CustomGradient,
     imageUri: Uri?,
+    deviceFrameAspectRatio: Float = 9f / 19.5f,
     ambientBlurRadius: Float,
     screenshotScale: Float,
     screenshotOffsetX: Float,
@@ -3822,12 +5449,21 @@ fun shareMockupImage(
     shadowOffsetY: Float = 15f,
     shadowColor: Color = Color.Black,
     backgroundUri: Uri? = null,
+    backgroundBlurRadius: Float = 0f,
+    showGlossyReflection: Boolean = true,
+    glossyReflectionOpacity: Float = 0.18f,
+    screenshotGrayscale: Float = 0f,
+    screenshotSepia: Float = 0f,
+    screenshotBrightness: Float = 1f,
+    screenshotContrast: Float = 1f,
+    screenshotLiquidGlass: Boolean = false,
     onComplete: () -> Unit
 ) {
     coroutineScope.launch {
         try {
             val highResBitmap = renderHighResMockup(
                 context, aspectRatio, backgroundType, solidColor, gradient, imageUri,
+                deviceFrameAspectRatio,
                 ambientBlurRadius, screenshotScale, screenshotOffsetX, screenshotOffsetY,
                 activeTemplate, bezelColor, bezelThickness, screenCornerRadius, showStatusBarIcons,
                 tiltX, tiltY, tiltZ, perspectiveDepth, shadowStrength, showWatermark,
@@ -3839,7 +5475,15 @@ fun shareMockupImage(
                 shadowOffsetX = shadowOffsetX,
                 shadowOffsetY = shadowOffsetY,
                 shadowColor = shadowColor,
-                backgroundUri = backgroundUri
+                backgroundUri = backgroundUri,
+                backgroundBlurRadius = backgroundBlurRadius,
+                showGlossyReflection = showGlossyReflection,
+                glossyReflectionOpacity = glossyReflectionOpacity,
+                screenshotGrayscale = screenshotGrayscale,
+                screenshotSepia = screenshotSepia,
+                screenshotBrightness = screenshotBrightness,
+                screenshotContrast = screenshotContrast,
+                screenshotLiquidGlass = screenshotLiquidGlass
             )
 
             // Cache image locally inside app directory and share via FileProvider
